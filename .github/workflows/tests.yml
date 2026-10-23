@@ -1,0 +1,24 @@
+name: Linux sandbox tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Unit and integration tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Verify sandbox launch
+        run: ./bbj doctor --self-test
+      - name: Validate bounded sandbox behaviors
+        run: ./bbj benchmark --cgroups off
+
+      - name: Measure launch overhead (bounded safe probes)
+        run: |
+          ./bbj measure --iterations 3 --cgroups off > /tmp/bbj-overhead.json
+          python3 -m json.tool /tmp/bbj-overhead.json > /dev/null

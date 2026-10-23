@@ -1,0 +1,12 @@
+{
+  "timeout_seconds": 15,
+  "cpu_seconds": 10,
+  "memory_limit_mb": 512,
+  "max_output_kb": 1024,
+  "max_processes": 64,
+  "max_open_files": 128,
+  "max_file_mb": 64,
+  "network": false,
+  "seccomp": true,
+  "cgroups": "auto"
+}
