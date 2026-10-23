@@ -27,3 +27,16 @@
 - Added successful, bounded CPU/memory/process example workloads and intentional non-zero-exit/timeout fixtures.
 - Added `examples/demo_suite.sh` for an end-to-end demonstration on a Linux host with Bubblewrap available.
 - Explicitly documents that syscall, detailed filesystem, and network tracing are not yet collected by this version; seccomp remains an enforcement filter, not a syscall history.
+
+
+## 2.3.1 — integration-test fix
+
+- Fixed missing `platform` and `sys` imports in the execution-report host metadata path, which caused sandbox integration tests to raise `NameError` after workload execution.
+
+## 2.3.2 — restricted-host network isolation fallback
+
+- Detects the specific Bubblewrap loopback `RTM_NEWADDR` permission failure before launching a workload.
+- On that failure only, keeps user/PID/IPC/UTS/mount isolation and installs seccomp network-syscall denials rather than silently exposing host networking.
+- Adds explicit report/event fields for the network isolation method and fallback reason; prints a warning when the fallback is active.
+- Adds x86-64 and ARM64 seccomp rules blocking socket operations and io_uring in fallback mode.
+- Adds tests for fallback command construction, syscall coverage, and kernel-level socket denial.

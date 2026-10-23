@@ -26,7 +26,7 @@ flowchart TD
 
 Bubblewrap creates fresh namespaces and constructs a new mount view. The workload capability set is explicitly dropped (`--cap-drop ALL`). Selected system runtime paths are bind-mounted read-only. The process gets a fresh `/proc`, minimal `/dev`, and size-bounded tmpfs mounts for scratch locations. The chosen workspace is mounted at `/workspace`; it is the only host directory intentionally exposed writable by the design. The host home directory and host `/tmp` are not mounted into the sandbox.
 
-The default network namespace is isolated. The `--network` option opts into sharing the host network namespace; that is intentionally an explicit trust decision rather than the default.
+Network isolation prefers a dedicated network namespace. If Bubblewrap specifically fails while configuring the loopback interface because the host denies `RTM_NEWADDR`/`RTM_NEWLINK`, BlackBoxJail retains user, PID, IPC, UTS, and mount isolation and applies a seccomp profile that denies socket and related network syscalls. The JSON report distinguishes `network_namespace` from `seccomp_network_syscall_block`; the fallback is not described as a separate network namespace and can restrict AF_UNIX socket use. Other namespace setup failures do not trigger this fallback and still fail closed. The `--network` option explicitly opts into sharing the host network namespace.
 
 ### 2. Syscall filtering
 

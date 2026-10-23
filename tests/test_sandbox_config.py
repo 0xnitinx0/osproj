@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from blackboxjail.sandbox import build_bwrap_command, execute, SandboxError
+from blackboxjail.sandbox import (build_bwrap_command, execute, SandboxError, _probe_network_namespace_support)
 
 
 class SandboxConfigTests(unittest.TestCase):
@@ -24,6 +24,31 @@ class SandboxConfigTests(unittest.TestCase):
             self.assertIn("/usr/local", command)
         self.assertNotIn("SECRET_TOKEN", command)
         self.assertNotIn("--share-net", command)
+
+    @patch("blackboxjail.sandbox.subprocess.run")
+    @patch("blackboxjail.sandbox.shutil.which", return_value="/usr/bin/bwrap")
+    def test_probe_recognizes_bubblewrap_loopback_permission_failure(self, _which, mock_run):
+        _probe_network_namespace_support.cache_clear()
+        mock_run.return_value = __import__("subprocess").CompletedProcess(
+            ["/usr/bin/bwrap"], 1, b"", b"bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+        )
+        result = _probe_network_namespace_support("/usr/bin/bwrap")
+        self.assertEqual(result[0], "restricted")
+        self.assertIn("RTM_NEWADDR", result[1])
+        _probe_network_namespace_support.cache_clear()
+
+    @patch("blackboxjail.sandbox.shutil.which", return_value="/usr/bin/bwrap")
+    def test_network_restricted_fallback_keeps_other_namespaces_and_shares_net_explicitly(self, _which):
+        with tempfile.TemporaryDirectory() as tmp:
+            command = build_bwrap_command(["/bin/true"], Path(tmp), False, {},
+                                          unshare_network=False)
+        self.assertIn("--unshare-user", command)
+        self.assertIn("--unshare-pid", command)
+        self.assertIn("--unshare-ipc", command)
+        self.assertIn("--unshare-uts", command)
+        self.assertIn("--share-net", command)
+        self.assertNotIn("--unshare-all", command)
+        self.assertNotIn("--unshare-net", command)
 
     @patch("blackboxjail.sandbox.shutil.which", return_value="/usr/bin/bwrap")
     def test_network_is_only_shared_when_requested(self, _which):

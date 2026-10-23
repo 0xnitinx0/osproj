@@ -75,15 +75,18 @@ def run_benchmarks(*, cgroups: str = "auto", memory_limit_mb: int = 128,
                 {
                     "name": "network_isolation_default",
                     "command": [sys.executable, "-c", """import socket, sys
-s = socket.socket()
-s.settimeout(0.4)
+s = None
 try:
+    s = socket.socket()
+    s.settimeout(0.4)
     s.connect(("127.0.0.1", int(sys.argv[1])))
     print("NETWORK_REACHABLE")
 except OSError:
+    # Includes seccomp fallback rejecting socket creation before connect().
     print("NETWORK_ISOLATED")
 finally:
-    s.close()
+    if s is not None:
+        s.close()
 """, str(host_port)],
                     "expected": "completed", "timeout_seconds": 3, "cpu_seconds": 2,
                     "memory_limit_mb": memory_limit_mb, "max_output_kb": output_kb,
@@ -185,6 +188,7 @@ except MemoryError:
                     "note": note, "report_path": result.get("report_path"),
                     "cgroup_v2_enforced": result.get("sandbox", {}).get("cgroup_v2_enforced", False),
                     "cgroup_cpu_accounting": result.get("sandbox", {}).get("cgroup_cpu_accounting", False),
+                    "network_isolation_method": result.get("sandbox", {}).get("network_isolation_method", "unknown"),
                 })
 
     return {

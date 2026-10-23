@@ -18,7 +18,7 @@ A workload may be buggy or malicious. It may attempt to access files outside the
 
 ## Controls
 
-- Bubblewrap creates mount, PID, IPC, UTS and user namespaces and a network namespace by default, and explicitly drops all Linux capabilities from the sandboxed workload.
+- Bubblewrap creates mount, PID, IPC, UTS and user namespaces and normally a network namespace, and explicitly drops all Linux capabilities from the sandboxed workload. On hosts that specifically deny loopback setup, a seccomp fallback blocks network socket syscalls while reporting that no separate network namespace was created.
 - The filesystem is assembled from a small read-only runtime plus an explicitly selected writable workspace; `/tmp`, `/dev/shm`, and `/run` are size-bounded tmpfs mounts.
 - A compiled, architecture-checked seccomp cBPF profile returns `EPERM` for selected high-risk syscall families.
 - Per-process limits constrain CPU time, address space, file size, open file descriptors, core dumps and locked memory.

@@ -16,6 +16,18 @@ class SeccompTests(unittest.TestCase):
         for name in ("mount", "ptrace", "bpf", "unshare", "setns", "perf_event_open"):
             self.assertIn(name, names)
 
+    def test_network_fallback_profile_denies_socket_and_io_uring_syscalls(self):
+        names = denied_syscalls(include_default=False, block_network=True)
+        for name in ("socket", "connect", "bind", "sendto", "recvfrom", "socketpair",
+                     "io_uring_setup", "io_uring_enter", "io_uring_register"):
+            self.assertIn(name, names)
+        self.assertNotIn("ptrace", names)  # network-only fallback when --no-seccomp was requested
+
+    def test_network_fallback_filter_compiles(self):
+        program = build_denylist_filter(include_default=False, block_network=True)
+        self.assertGreater(len(program), 8 * 10)
+        self.assertEqual(len(program) % 8, 0)
+
     def test_architecture_aliases(self):
         with patch("blackboxjail.seccomp.platform.machine", return_value="arm64"):
             self.assertEqual(current_architecture(), "aarch64")

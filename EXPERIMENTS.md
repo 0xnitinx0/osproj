@@ -16,7 +16,7 @@ Run:
 ./bbj audit
 ```
 
-The suite checks nine bounded behaviors: baseline execution, timeout, output capture bounds, `ptrace` denial, workspace writes, default network isolation against a host-only loopback listener, a per-file size limit, process-count control, and address-space/memory-limit behavior. Each scenario saves a JSON report. The suite intentionally avoids uncontrolled fork bombs, public-network probes, and host memory exhaustion. Treat it as a regression suite, not proof of a complete security boundary.
+The suite checks nine bounded behaviors: baseline execution, timeout, output capture bounds, `ptrace` denial, workspace writes, default network restriction against a host-only loopback listener, a per-file size limit, process-count control, and address-space/memory-limit behavior. On hosts where Bubblewrap cannot configure loopback, network socket syscalls are denied through seccomp instead; the report identifies this fallback and the network probe treats socket-creation denial as an isolated result. Each scenario saves a JSON report. The suite intentionally avoids uncontrolled fork bombs, public-network probes, and host memory exhaustion. Treat it as a regression suite, not proof of a complete security boundary.
 
 
 ## Native-vs-sandboxed overhead
@@ -54,7 +54,7 @@ For a course report, repeat each scenario at least 20 times on an idle machine a
 | Seccomp probe | `ptrace` returns `EPERM` in the filter test | benchmark output `BLOCKED`, `seccomp_enabled: true` |
 | Cgroup memory pressure | Hard aggregate ceiling or kernel OOM event when delegated | `cgroup_v2_enforced`, memory event counters, final report |
 | Cgroup task pressure | Kernel refuses additional tasks at `pids.max`, or sampled fallback terminates the workload | pids controller counters when available; otherwise sampled process count and `process_limit_exceeded` status |
-| Default network isolation | A sandbox process cannot reach a host-only listener on host loopback | `NETWORK_ISOLATED` probe result |
+| Default network restriction | A sandbox process cannot reach a host-only listener on host loopback | `NETWORK_ISOLATED` probe result; report records whether this came from a network namespace or the restricted-host seccomp fallback |
 | Per-file ceiling | A file write larger than `RLIMIT_FSIZE` receives `EFBIG` or is terminated by `SIGXFSZ` | status, file size and `file_limit_exceeded` handling |
 | Address-space limit | A process cannot allocate beyond `RLIMIT_AS` | `MemoryError` marker or report showing memory-limit termination; distinguish this from cgroup OOM |
 | Journal tampering | Audit verifier flags modified records | `./bbj audit` reports a hash mismatch |

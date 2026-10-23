@@ -50,6 +50,30 @@ ARCHITECTURES: dict[str, tuple[int, dict[str, int]]] = {
     }),
 }
 
+
+# Network syscalls denied when a restricted host cannot create a network
+# namespace. This fallback is weaker than a dedicated net namespace, so reports
+# name it explicitly rather than claiming namespace isolation.
+NETWORK_SYSCALLS: dict[str, dict[str, int]] = {
+    "x86_64": {
+        "socket": 41, "connect": 42, "accept": 43, "sendto": 44,
+        "recvfrom": 45, "sendmsg": 46, "recvmsg": 47, "shutdown": 48,
+        "bind": 49, "listen": 50, "getsockname": 51, "getpeername": 52,
+        "socketpair": 53, "setsockopt": 54, "getsockopt": 55,
+        "accept4": 288, "recvmmsg": 299, "sendmmsg": 307,
+        # io_uring has socket/create/connect/accept/send/receive operations too.
+        "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+    },
+    "aarch64": {
+        "socket": 198, "socketpair": 199, "bind": 200, "listen": 201,
+        "accept": 202, "connect": 203, "getsockname": 204, "getpeername": 205,
+        "sendto": 206, "recvfrom": 207, "setsockopt": 208, "getsockopt": 209,
+        "shutdown": 210, "sendmsg": 211, "recvmsg": 212,
+        "accept4": 242, "recvmmsg": 243, "sendmmsg": 269,
+        "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+    },
+}
+
 # Each instruction is struct sock_filter: u16 code, u8 jt, u8 jf, u32 k.
 def _insn(code: int, jt: int = 0, jf: int = 0, k: int = 0) -> bytes:
     return struct.pack("=HBBI", code, jt, jf, k)
@@ -64,10 +88,19 @@ def current_architecture() -> str:
     return machine
 
 
-def build_denylist_filter() -> bytes:
-    """Return a binary cBPF seccomp program; unknown audit architectures are killed."""
+def build_denylist_filter(*, include_default: bool = True, block_network: bool = False) -> bytes:
+    """Return an architecture-checked cBPF filter.
+
+    ``block_network`` adds socket and socket-operation denials for hosts where
+    Bubblewrap cannot configure a network namespace. This fallback intentionally
+    blocks all new network socket operations (including AF_UNIX socketpair) and
+    is reported separately from network-namespace isolation.
+    """
     architecture = current_architecture()
-    audit_arch, syscalls = ARCHITECTURES[architecture]
+    audit_arch, default_syscalls = ARCHITECTURES[architecture]
+    syscalls = dict(default_syscalls) if include_default else {}
+    if block_network:
+        syscalls.update(NETWORK_SYSCALLS[architecture])
     program = bytearray()
     # seccomp_data.arch lives at byte offset 4.  On a mismatch, kill the process.
     program += _insn(BPF_LD_W_ABS, k=4)
@@ -89,6 +122,10 @@ def build_denylist_filter() -> bytes:
     return bytes(program)
 
 
-def denied_syscalls() -> list[str]:
-    """Return the symbolic syscall names covered on this CPU architecture."""
-    return sorted(ARCHITECTURES[current_architecture()][1])
+def denied_syscalls(*, include_default: bool = True, block_network: bool = False) -> list[str]:
+    """Return syscall names denied by the requested filter profile."""
+    architecture = current_architecture()
+    names = set(ARCHITECTURES[architecture][1]) if include_default else set()
+    if block_network:
+        names.update(NETWORK_SYSCALLS[architecture])
+    return sorted(names)

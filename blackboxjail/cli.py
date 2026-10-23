@@ -65,6 +65,10 @@ def cmd_doctor(self_test: bool = False) -> int:
         )
         print(f"[{result['status'].upper()}] {result.get('stdout', '').strip()}")
         backend = result.get("sandbox", {})
+        if backend.get("network_isolation_method") == "seccomp_network_syscall_block":
+            print("[WARN] Network namespace setup is restricted on this host; using seccomp network-syscall blocking fallback")
+        elif backend.get("network_isolation_method") == "network_namespace":
+            print("[OK] Network namespace isolation active")
         if backend.get("cgroup_v2_enforced"):
             if backend.get("cgroup_cpu_accounting"):
                 print("[OK] cgroup v2 hard memory/task caps and aggregate CPU accounting active")
@@ -121,8 +125,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("Workspace: dedicated per-run directory (safe default; see report for its path)")
     else:
         print(f"Workspace (writable by workload): {Path(args.workspace).expanduser().resolve()}")
-    print("Network: enabled" if overrides["network"] else "Network: disabled (isolated network namespace)")
-    print(f"Enforcement: seccomp={'on' if overrides['seccomp'] else 'OFF'}; cgroups={overrides['cgroups']}; "
+    print("Network policy: host network sharing requested" if overrides["network"] else
+          "Network policy: disabled (network namespace preferred; restricted-host fallback available)")
+    print(f"Enforcement: seccomp deny-list={'on' if overrides['seccomp'] else 'OFF'}; cgroups={overrides['cgroups']}; "
           f"{overrides['max_processes']} processes; {overrides['max_open_files']} open files")
     print(f"Limits: {overrides['timeout_seconds']}s wall time, {overrides['cpu_seconds']}s CPU budget, "
           f"{overrides['memory_limit_mb']} MiB memory, {overrides['max_output_kb']} KiB per output stream, "
@@ -157,6 +162,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                   f"Peak sampled process-tree RSS: {_size(metrics.get('peak_rss_bytes_sampled', 0))} | "
                   f"Peak observed processes: {metrics.get('peak_process_count_sampled', 0)}")
     sandbox_info = result.get("sandbox", {})
+    network_method = sandbox_info.get("network_isolation_method")
+    if network_method == "seccomp_network_syscall_block":
+        print("Network isolation fallback: network namespace setup was denied by the host; "
+              "network socket syscalls are blocked by seccomp instead.")
+        print("Note: this fallback is not a separate network namespace and may restrict AF_UNIX socket use.")
+    elif network_method == "network_namespace":
+        print("Network isolation: separate network namespace")
+    elif network_method == "shared_host_network":
+        print("Network isolation: disabled; workload shares the host network")
     if sandbox_info.get("cgroup_fallback_reason"):
         print(f"Cgroup fallback: {sandbox_info['cgroup_fallback_reason']}")
     if result.get("error"):

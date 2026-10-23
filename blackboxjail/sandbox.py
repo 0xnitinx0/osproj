@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+from functools import lru_cache
 from pathlib import Path
 import platform
 import resource
@@ -61,6 +62,7 @@ def _add_readonly_mounts(args: list[str]) -> None:
 def build_bwrap_command(
     command: list[str], workspace: Path, network: bool, env: dict[str, str],
     *, seccomp_fd: int | None = None, tmpfs_limit_bytes: int = 128 * 1024 * 1024,
+    unshare_network: bool = True,
 ) -> list[str]:
     bwrap = shutil.which("bwrap")
     if not bwrap:
@@ -70,9 +72,19 @@ def build_bwrap_command(
     # Bubblewrap normally starts the workload without capabilities for an ordinary
     # unprivileged caller. Make the intended policy explicit as well, including when
     # the launcher is invoked from a privileged development/test environment.
-    args = [bwrap, "--die-with-parent", "--new-session", "--unshare-all", "--cap-drop", "ALL", "--clearenv"]
-    if network:
-        args.append("--share-net")
+    if unshare_network:
+        args = [bwrap, "--die-with-parent", "--new-session", "--unshare-all", "--cap-drop", "ALL", "--clearenv"]
+        if network:
+            args.append("--share-net")
+    else:
+        # Some Ubuntu/AppArmor and nested-container environments allow the other
+        # namespaces but deny configuring lo inside a new network namespace. In that
+        # case retain the other isolation namespaces and share the network namespace;
+        # a seccomp profile must separately deny network socket syscalls. Never use
+        # this path unless the caller has installed that fallback filter.
+        args = [bwrap, "--die-with-parent", "--new-session", "--unshare-user",
+                "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try",
+                "--share-net", "--cap-drop", "ALL", "--clearenv"]
     if seccomp_fd is not None:
         args.extend(["--seccomp", str(seccomp_fd)])
     _add_readonly_mounts(args)
@@ -100,6 +112,38 @@ def build_bwrap_command(
         *command,
     ]
     return args
+
+
+
+@lru_cache(maxsize=4)
+def _probe_network_namespace_support(bwrap_path: str) -> tuple[str, str | None]:
+    """Probe Bubblewrap's network namespace support once per executable.
+
+    Returns ("available", None), ("restricted", reason) for the known loopback
+    RTM_NEWADDR/RTM_NEWLINK EPERM failure, or ("unknown", diagnostic) for unrelated
+    failures. Only the known network setup failure enables the seccomp fallback.
+    """
+    del bwrap_path  # build_bwrap_command uses shutil.which; key preserves cache by path.
+    if not shutil.which("bwrap"):
+        return "unknown", "bubblewrap is not installed"
+    try:
+        with tempfile.TemporaryDirectory(prefix="bbj-netns-probe-") as tmp:
+            command = build_bwrap_command(["/bin/true"], Path(tmp), False, {},
+                                          unshare_network=True)
+            result = subprocess.run(command, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=4, check=False, close_fds=True)
+    except (OSError, subprocess.SubprocessError, SandboxError) as exc:
+        return "unknown", str(exc)
+    stderr = result.stderr.decode("utf-8", errors="replace").strip()
+    if result.returncode == 0:
+        return "available", None
+    network_setup_denied = (
+        "RTM_NEWADDR" in stderr and "Operation not permitted" in stderr
+    ) or ("loopback" in stderr.lower() and "RTM_NEWLINK" in stderr and "Operation not permitted" in stderr)
+    if network_setup_denied:
+        return "restricted", stderr
+    return "unknown", stderr or f"network namespace probe exited {result.returncode}"
 
 
 def _preexec_limits(cpu_seconds: int, memory_bytes: int, max_open_files: int,
@@ -153,8 +197,6 @@ def execute(
         raise SandboxError("Command must be a non-empty list of strings")
     if not command[0]:
         raise SandboxError("The command executable must not be empty")
-    if not os.path.exists("/proc/self/stat") or not Path("/proc/self/cgroup").exists():
-        raise SandboxError("BlackBoxJail currently requires Linux with /proc mounted")
     if cgroups not in ("auto", "required", "off"):
         raise SandboxError("cgroups must be 'auto', 'required', or 'off'")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) \
@@ -172,6 +214,10 @@ def execute(
         raise SandboxError("max_processes must be >= 2 and max_open_files must be >= 16")
     if not isinstance(network, bool) or not isinstance(seccomp, bool):
         raise SandboxError("network and seccomp options must be true or false")
+    # Validate user-supplied options before rejecting unsupported host platforms,
+    # so invalid arguments get consistent, actionable errors on every OS.
+    if not os.path.exists("/proc/self/stat") or not Path("/proc/self/cgroup").exists():
+        raise SandboxError("BlackBoxJail currently requires Linux with /proc mounted")
 
     run_id = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + "Z-" + uuid.uuid4().hex[:8]
     if workspace is None:
@@ -232,6 +278,9 @@ def execute(
     return_code: int | None = None
     cgroup: CgroupV2 | None = None
     cgroup_fallback_reason: str | None = None
+    network_isolation_method = "shared_host_network" if network else "network_namespace"
+    network_isolation_fallback_reason: str | None = None
+    network_namespace_supported = True
     seccomp_fd_file = None
     proc: subprocess.Popen[bytes] | None = None
     selector = selectors.DefaultSelector()
@@ -253,10 +302,31 @@ def execute(
                 recorder.record("cgroup_fallback", run_id=run_id, reason=cgroup_fallback_reason)
 
         denied: list[str] = []
-        if seccomp:
+        network_seccomp_fallback = False
+        if not network:
+            bwrap_path = shutil.which("bwrap")
+            if bwrap_path:
+                probe_status, probe_detail = _probe_network_namespace_support(bwrap_path)
+                if probe_status == "restricted":
+                    network_namespace_supported = False
+                    network_seccomp_fallback = True
+                    network_isolation_method = "seccomp_network_syscall_block"
+                    network_isolation_fallback_reason = probe_detail
+                    recorder.record("network_namespace_unavailable", run_id=run_id,
+                                    reason=probe_detail,
+                                    fallback="seccomp blocks network socket syscalls")
+                elif probe_status == "unknown":
+                    # Unrelated namespace/setup failures are not papered over. Let the
+                    # actual launch produce the authoritative error and report.
+                    recorder.record("network_namespace_probe_inconclusive", run_id=run_id,
+                                    reason=probe_detail)
+
+        if seccomp or network_seccomp_fallback:
             try:
-                filter_bytes = build_denylist_filter()
-                denied = denied_syscalls()
+                filter_bytes = build_denylist_filter(
+                    include_default=seccomp, block_network=network_seccomp_fallback)
+                denied = denied_syscalls(
+                    include_default=seccomp, block_network=network_seccomp_fallback)
                 seccomp_fd_file = tempfile.TemporaryFile(mode="w+b")
                 seccomp_fd_file.write(filter_bytes)
                 seccomp_fd_file.flush()
@@ -268,6 +338,7 @@ def execute(
             command, workdir, network, dict(os.environ),
             seccomp_fd=seccomp_fd_file.fileno() if seccomp_fd_file is not None else None,
             tmpfs_limit_bytes=memory_bytes,
+            unshare_network=network_namespace_supported,
         )
         pass_fds = (seccomp_fd_file.fileno(),) if seccomp_fd_file is not None else ()
         try:
@@ -297,9 +368,13 @@ def execute(
         os.set_blocking(proc.stderr.fileno(), False)
         selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
         selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+        actual_seccomp_enabled = seccomp or network_seccomp_fallback
         recorder.record("sandbox_started", run_id=run_id, pid=proc.pid, network_enabled=network,
-                        seccomp_enabled=seccomp, denied_syscalls=denied,
-                        cgroup_enforced=cgroup is not None)
+                        network_isolation_method=network_isolation_method,
+                        network_isolation_fallback_reason=network_isolation_fallback_reason,
+                        seccomp_enabled=actual_seccomp_enabled, seccomp_requested=seccomp,
+                        network_syscall_blocking=network_seccomp_fallback,
+                        denied_syscalls=denied, cgroup_enforced=cgroup is not None)
 
         end_by = start_wall + float(timeout_seconds)
         last_sample = 0.0
@@ -500,8 +575,14 @@ def execute(
                 "backend": "bubblewrap",
                 "filesystem": "selected system runtime paths read-only; isolated /tmp; workspace writable",
                 "network_enabled": network,
-                "namespaces": ["user", "pid", "mount", "ipc", "uts", "network (unless enabled)"],
-                "seccomp_enabled": seccomp,
+                "network_isolation_method": network_isolation_method,
+                "network_namespace_enforced": (not network and network_namespace_supported),
+                "network_syscall_blocking_enforced": network_seccomp_fallback,
+                "network_isolation_fallback_reason": network_isolation_fallback_reason,
+                "namespaces": ["user", "pid", "mount", "ipc", "uts"] + (["network"] if not network and network_namespace_supported else []),
+                "seccomp_enabled": seccomp or network_seccomp_fallback,
+                "seccomp_requested": seccomp,
+                "seccomp_profile": ("default_denylist_plus_network_block" if seccomp and network_seccomp_fallback else "network_block_only" if network_seccomp_fallback else "default_denylist" if seccomp else "disabled"),
                 "seccomp_denied_syscalls": denied,
                 "cgroup_v2_enforced": cgroup is not None,
                 "cgroup_cpu_accounting": bool(cgroup and cgroup.cpu_accounting),
